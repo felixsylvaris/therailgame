@@ -1,0 +1,322 @@
+import pygame
+import math
+import random
+
+pygame.init()
+
+WIDTH, HEIGHT = 1000, 800
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Hex Road Builder")
+
+WHITE = (240, 240, 240)
+BLACK = (20, 20, 20)
+GREEN = (50, 150, 80)
+BLUE = (50, 100, 200)
+RED = (220, 50, 50)
+GRAY = (160, 160, 160)
+YELLOW = (250, 210, 60)      # powered tile highlight
+GOLD = (230, 170, 20)        # power source dot
+DARK_RED = (150, 30, 30)     # bin
+LIGHT_GRAY = (210, 210, 210)
+
+clock = pygame.time.Clock()
+FONT = pygame.font.SysFont(None, 32)
+BIG_FONT = pygame.font.SysFont(None, 60)
+
+HEX_SIZE = 40
+COLS = 10
+ROWS = 8
+
+# ---------------------------------------------------------------------------
+# HEX GEOMETRY
+# ---------------------------------------------------------------------------
+
+def hex_points(x, y):
+    """Corner points of a flat-top hexagon centered at (x, y)."""
+    pts = []
+    for i in range(6):
+        angle = math.radians(60 * i)
+        pts.append((x + HEX_SIZE * math.cos(angle),
+                     y + HEX_SIZE * math.sin(angle)))
+    return pts
+
+
+def hex_center(col, row):
+    x = 150 + col * HEX_SIZE * 1.5
+    y = 150 + row * HEX_SIZE * math.sqrt(3)
+    if col % 2:
+        y += HEX_SIZE * math.sqrt(3) / 2
+    return x, y
+
+
+def edge_point(cx, cy, edge):
+    """Midpoint of the given edge (0-5) of a hex centered at (cx, cy)."""
+    a1 = math.radians(60 * edge)
+    a2 = math.radians(60 * (edge + 1))
+    p1 = (cx + HEX_SIZE * math.cos(a1), cy + HEX_SIZE * math.sin(a1))
+    p2 = (cx + HEX_SIZE * math.cos(a2), cy + HEX_SIZE * math.sin(a2))
+    return ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+
+
+# Offset-coordinate neighbor table for a flat-top "odd-q" hex grid
+# (odd columns are shifted down by half a row, matching hex_center above).
+NEIGHBOR_OFFSETS = {
+    0: {"even": (1, 0),  "odd": (1, 1)},   # lower-right
+    1: {"even": (0, 1),  "odd": (0, 1)},   # down
+    2: {"even": (-1, 0), "odd": (-1, 1)},  # lower-left
+    3: {"even": (-1, -1), "odd": (-1, 0)}, # upper-left
+    4: {"even": (0, -1), "odd": (0, -1)},  # up
+    5: {"even": (1, -1), "odd": (1, 0)},   # upper-right
+}
+
+
+def neighbor_coords(col, row, edge):
+    parity = "odd" if col % 2 else "even"
+    dc, dr = NEIGHBOR_OFFSETS[edge][parity]
+    return col + dc, row + dr
+
+
+# ---------------------------------------------------------------------------
+# ROAD TOKENS  (5- and 6-armed tiles removed - too expensive for this economy)
+# ---------------------------------------------------------------------------
+
+TOKENS = [
+    [0, 3],       # straight
+    [1, 2],       # curve
+    [0, 2],       # curve
+    [0, 2, 4],    # Y road
+    [0, 1, 3],    # another Y
+    [0, 1, 2, 3], # crossroads
+    [0, 2, 4],
+    [1, 3],
+    [0, 3, 5],
+]
+
+
+def rotate(token):
+    return [(x + 1) % 6 for x in token]
+
+
+def draw_token():
+    return random.choice(TOKENS).copy()
+
+
+# ---------------------------------------------------------------------------
+# BOARD / GAME STATE
+# ---------------------------------------------------------------------------
+
+board = {}
+for c in range(COLS):
+    for r in range(ROWS):
+        board[(c, r)] = {
+            "col": c,
+            "row": r,
+            "roads": [],
+            "city": random.random() < 0.10,
+            "is_source": False,
+            "powered": False,
+        }
+
+cities = [tile for tile in board.values() if tile["city"]]
+
+current_token = draw_token()
+first_tile_placed = False
+
+score = 0
+trash_penalty = 0
+won = False
+
+BIN_RECT = pygame.Rect(760, 320, 180, 70)
+
+
+def find_tile(mouse_pos):
+    mx, my = mouse_pos
+    for tile in board.values():
+        cx, cy = hex_center(tile["col"], tile["row"])
+        if math.dist((mx, my), (cx, cy)) < HEX_SIZE:
+            return tile
+    return None
+
+
+# ---------------------------------------------------------------------------
+# NETWORK / SCORING
+# ---------------------------------------------------------------------------
+
+def update_power_network():
+    """BFS outward from every power-source tile along matching road edges."""
+    for tile in board.values():
+        tile["powered"] = False
+
+    sources = [t for t in board.values() if t["is_source"]]
+    visited = set()
+    queue = []
+
+    for s in sources:
+        s["powered"] = True
+        visited.add((s["col"], s["row"]))
+        queue.append(s)
+
+    while queue:
+        cur = queue.pop()
+        for edge in cur["roads"]:
+            nc, nr = neighbor_coords(cur["col"], cur["row"], edge)
+            nbr = board.get((nc, nr))
+            if nbr is None or (nc, nr) in visited:
+                continue
+            opposite_edge = (edge + 3) % 6
+            if opposite_edge in nbr["roads"]:
+                nbr["powered"] = True
+                visited.add((nc, nr))
+                queue.append(nbr)
+
+
+def recompute_score():
+    global score
+    powered_score = 0
+    for tile in board.values():
+        if tile["powered"]:
+            powered_score += 1
+            if tile["city"]:
+                powered_score += 4
+    score = powered_score + trash_penalty
+
+
+def check_win():
+    if not cities:
+        return False
+    return all(city["powered"] for city in cities)
+
+
+# ---------------------------------------------------------------------------
+# DRAWING
+# ---------------------------------------------------------------------------
+
+def draw_tile(tile):
+    cx, cy = hex_center(tile["col"], tile["row"])
+
+    if tile["city"]:
+        fill = GREEN
+    elif tile["powered"]:
+        fill = YELLOW
+    else:
+        fill = GRAY
+
+    pygame.draw.polygon(screen, fill, hex_points(cx, cy))
+    pygame.draw.polygon(screen, BLACK, hex_points(cx, cy), 2)
+
+    for edge in tile["roads"]:
+        p = edge_point(cx, cy, edge)
+        pygame.draw.line(screen, BLUE, (cx, cy), p, 8)
+        pygame.draw.circle(screen, RED, (int(p[0]), int(p[1])), 7)
+
+    if tile["is_source"]:
+        pygame.draw.circle(screen, GOLD, (int(cx), int(cy)), 14)
+        pygame.draw.circle(screen, BLACK, (int(cx), int(cy)), 14, 2)
+    elif tile["roads"]:
+        pygame.draw.circle(screen, BLUE, (int(cx), int(cy)), 6)
+
+
+def draw_token_preview():
+    pygame.draw.rect(screen, WHITE, (760, 80, 180, 180))
+    pygame.draw.circle(screen, GRAY, (850, 170), HEX_SIZE)
+    for e in current_token:
+        p = edge_point(850, 170, e)
+        pygame.draw.line(screen, BLUE, (850, 170), p, 8)
+    label = FONT.render("Next tile", True, BLACK)
+    screen.blit(label, (790, 40))
+
+
+def draw_bin():
+    pygame.draw.rect(screen, DARK_RED, BIN_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, BIN_RECT, 2, border_radius=8)
+    label = FONT.render("Trash tile (-1)", True, WHITE)
+    rect = label.get_rect(center=BIN_RECT.center)
+    screen.blit(label, rect)
+
+
+def draw_hud():
+    score_label = FONT.render(f"Score: {score}", True, BLACK)
+    screen.blit(score_label, (760, 420))
+
+    powered = sum(1 for t in board.values() if t["powered"])
+    cities_powered = sum(1 for c in cities if c["powered"])
+    info_label = FONT.render(
+        f"Cities powered: {cities_powered}/{len(cities)}", True, BLACK
+    )
+    screen.blit(info_label, (760, 455))
+
+    help_label = FONT.render("R: rotate | Click: place | Bin: trash", True, BLACK)
+    screen.blit(help_label, (700, 500))
+
+    if not first_tile_placed:
+        hint = FONT.render("First placement = power source!", True, DARK_RED)
+        screen.blit(hint, (700, 530))
+
+
+def draw():
+    screen.fill(WHITE)
+
+    for tile in board.values():
+        draw_tile(tile)
+
+    draw_token_preview()
+    draw_bin()
+    draw_hud()
+
+    if won:
+        text = BIG_FONT.render("ALL CITIES CONNECTED & POWERED!", True, (20, 120, 20))
+        screen.blit(text, (60, 40))
+
+    pygame.display.flip()
+
+
+# ---------------------------------------------------------------------------
+# GAME LOOP
+# ---------------------------------------------------------------------------
+
+def place_current_token(tile):
+    global current_token, first_tile_placed, won
+
+    if not first_tile_placed:
+        # First placement ever: single-arm, unlimited power source.
+        tile["roads"] = [random.randrange(6)]
+        tile["is_source"] = True
+        first_tile_placed = True
+    else:
+        tile["roads"] = current_token.copy()
+
+    current_token = draw_token()
+    update_power_network()
+    recompute_score()
+    won = check_win()
+
+
+def trash_current_token():
+    global current_token, trash_penalty
+    trash_penalty -= 1
+    current_token = draw_token()
+    recompute_score()
+
+
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_r:
+                current_token = rotate(current_token)
+
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if BIN_RECT.collidepoint(event.pos):
+                trash_current_token()
+            else:
+                tile = find_tile(event.pos)
+                if tile and not tile["roads"]:
+                    place_current_token(tile)
+
+    draw()
+    clock.tick(60)
+
+pygame.quit()

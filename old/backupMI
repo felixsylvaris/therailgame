@@ -1,0 +1,854 @@
+import pygame
+import math
+import random
+
+pygame.init()
+
+WIDTH, HEIGHT = 1000, 800
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Hex Road Builder")
+
+WHITE = (240, 240, 240)
+BLACK = (20, 20, 20)
+GREEN = (50, 150, 80)
+BLUE = (50, 100, 200)
+RED = (220, 50, 50)
+GRAY = (160, 160, 160)
+LIGHT_GRAY = (205, 205, 205)
+YELLOW = (250, 210, 60)
+GOLD = (230, 170, 20)
+DARK_RED = (150, 30, 30)
+RIVER_BLUE = (70, 150, 220)
+LAKE_BLUE = (35, 90, 165)
+FOREST_GREEN = (25, 110, 45)
+SAWMILL_BROWN = (120, 70, 20)
+SHOP_PURPLE = (110, 80, 170)
+OK_GREEN = (60, 140, 60)
+HILL_BROWN = (110, 95, 75)
+MINE_COLOR = (90, 75, 60)
+TUNNEL_DARK = (25, 22, 18)
+FORGE_COLOR = (165, 60, 30)
+VINEYARD_PURPLE = (120, 60, 140)
+
+clock = pygame.time.Clock()
+FONT = pygame.font.SysFont(None, 26)
+SMALL_FONT = pygame.font.SysFont(None, 20)
+BIG_FONT = pygame.font.SysFont(None, 50)
+
+HEX_SIZE = 40
+COLS = 10
+ROWS = 8
+NUM_CITIES = 5
+
+# ---------------------------------------------------------------------------
+# HEX GEOMETRY
+# ---------------------------------------------------------------------------
+
+def hex_points(x, y):
+    pts = []
+    for i in range(6):
+        angle = math.radians(60 * i)
+        pts.append((x + HEX_SIZE * math.cos(angle),
+                     y + HEX_SIZE * math.sin(angle)))
+    return pts
+
+
+def hex_center(col, row):
+    x = 150 + col * HEX_SIZE * 1.5
+    y = 150 + row * HEX_SIZE * math.sqrt(3)
+    if col % 2:
+        y += HEX_SIZE * math.sqrt(3) / 2
+    return x, y
+
+
+def edge_point(cx, cy, edge):
+    a1 = math.radians(60 * edge)
+    a2 = math.radians(60 * (edge + 1))
+    p1 = (cx + HEX_SIZE * math.cos(a1), cy + HEX_SIZE * math.sin(a1))
+    p2 = (cx + HEX_SIZE * math.cos(a2), cy + HEX_SIZE * math.sin(a2))
+    return ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+
+
+# edge 0 = 4 o'clock, 1 = 6, 2 = 8, 3 = 10, 4 = 12, 5 = 2 (see the flat-top layout)
+NEIGHBOR_OFFSETS = {
+    0: {"even": (1, 0),  "odd": (1, 1)},
+    1: {"even": (0, 1),  "odd": (0, 1)},
+    2: {"even": (-1, 0), "odd": (-1, 1)},
+    3: {"even": (-1, -1), "odd": (-1, 0)},
+    4: {"even": (0, -1), "odd": (0, -1)},
+    5: {"even": (1, -1), "odd": (1, 0)},
+}
+
+
+def neighbor_coords(col, row, edge):
+    parity = "odd" if col % 2 else "even"
+    dc, dr = NEIGHBOR_OFFSETS[edge][parity]
+    return col + dc, row + dr
+
+
+# ---------------------------------------------------------------------------
+# TOKEN DECK (weighted - crosses are rare, no 5/6-arm tiles allowed)
+# ---------------------------------------------------------------------------
+
+TOKENS = [
+    ([0, 3], 5), ([1, 3], 4), ([0, 2], 4), ([1, 2], 3),
+    ([0], 2), ([0, 2, 4], 2), ([0, 1, 3], 2), ([0, 3, 5], 2),
+    ([0, 1, 2, 3], 1), ([0, 1, 3, 4], 1), ([0, 1, 3, 5], 1),
+]
+_TOKEN_SHAPES = [shape for shape, _ in TOKENS]
+_TOKEN_WEIGHTS = [weight for _, weight in TOKENS]
+
+SHOP_ITEMS = [([0, 3], 1), ([0, 2], 1), ([0], 2), ([0, 1], 2)]
+
+
+def draw_token():
+    return random.choices(_TOKEN_SHAPES, weights=_TOKEN_WEIGHTS, k=1)[0].copy()
+
+
+def rotate(token):
+    return [(x + 1) % 6 for x in token]
+
+
+# ---------------------------------------------------------------------------
+# BOARD / TERRAIN GENERATION
+# ---------------------------------------------------------------------------
+
+def generate_river():
+    start_col = random.randrange(COLS)
+    tile = board[(start_col, 0)]
+    entry_edge = 4
+    river_tiles = []
+    visited = set()
+
+    while tile is not None and (tile["col"], tile["row"]) not in visited:
+        exit_edge = random.choice([0, 1, 2])  # the three downward-facing edges
+        tile["river"] = True
+        tile["river_edges"] = [entry_edge, exit_edge]
+        river_tiles.append(tile)
+        visited.add((tile["col"], tile["row"]))
+
+        nc, nr = neighbor_coords(tile["col"], tile["row"], exit_edge)
+        next_tile = board.get((nc, nr))
+        if next_tile is None:
+            break
+        entry_edge = (exit_edge + 3) % 6
+        tile = next_tile
+
+    return river_tiles
+
+
+def generate_lakes(max_lakes=4):
+    placed = 0
+    prev_was_river = False
+    for tile in sorted(board.values(), key=lambda t: (t["row"], t["col"])):
+        if placed >= max_lakes:
+            break
+        prob = 0.15 if tile["river"] else (0.25 if prev_was_river else 0.01)
+        if random.random() < prob:
+            tile["lake"] = True
+            placed += 1
+        prev_was_river = tile["river"]
+    return placed
+
+
+def generate_forest_and_sawmill():
+    def usable(t):
+        return not t["lake"] and not t["river"]
+
+    left_pool = [t for t in board.values() if usable(t) and t["col"] < COLS // 2]
+    right_pool = [t for t in board.values() if usable(t) and t["col"] >= COLS // 2]
+
+    forest_tiles = random.sample(left_pool, min(2, len(left_pool)))
+    sawmill_tiles = random.sample(right_pool, min(2, len(right_pool)))
+
+    for t in forest_tiles:
+        t["special"] = "forest"
+    for t in sawmill_tiles:
+        t["special"] = "sawmill"
+    return forest_tiles, sawmill_tiles
+
+
+def generate_cities(n=NUM_CITIES):
+    candidates = [t for t in board.values()
+                  if not t["river"] and not t["lake"] and t["special"] is None]
+    chosen = random.sample(candidates, min(n, len(candidates)))
+    for t in chosen:
+        t["city"] = True
+    return chosen
+
+
+def is_empty_terrain(t):
+    """No city, river, lake, hill, or special feature - a genuinely plain tile."""
+    return (not t["city"] and not t["river"] and not t["lake"]
+            and not t["hill"] and t["special"] is None)
+
+
+def generate_hills(n=4):
+    """4 hills on the top half of the map, never on the very first row,
+    first column, or last column - and never on another feature."""
+    candidates = [
+        t for t in board.values()
+        if 1 <= t["row"] < ROWS // 2 and 1 <= t["col"] < COLS - 1
+        and not t["city"] and not t["river"] and not t["lake"] and t["special"] is None
+    ]
+    chosen = random.sample(candidates, min(n, len(candidates)))
+    for t in chosen:
+        t["hill"] = True
+    return chosen
+
+
+def generate_mines(hill_tiles, n=2):
+    """Walk the hills in order; drop a mine on the first empty neighbor
+    of each. Skip a hill with no empty neighbor. Run out of hills before
+    reaching n and you simply end up with fewer mines."""
+    mines = []
+    for hill in hill_tiles:
+        if len(mines) >= n:
+            break
+        for e in range(6):
+            nc, nr = neighbor_coords(hill["col"], hill["row"], e)
+            nbr = board.get((nc, nr))
+            if nbr is not None and is_empty_terrain(nbr):
+                nbr["special"] = "mine"
+                mines.append(nbr)
+                break
+    return mines
+
+
+def generate_forges(city_tiles, n=2):
+    """Scan cities from the bottom of the map upward. Drop a forge on the
+    first empty neighbor found. After a successful placement, skip the
+    very next city and try the one after that; after a failed attempt,
+    just move to the next city."""
+    forges = []
+    sorted_cities = sorted(city_tiles, key=lambda t: -t["row"])
+    idx = 0
+    while len(forges) < n and idx < len(sorted_cities):
+        city = sorted_cities[idx]
+        placed = False
+        for e in range(6):
+            nc, nr = neighbor_coords(city["col"], city["row"], e)
+            nbr = board.get((nc, nr))
+            if nbr is not None and is_empty_terrain(nbr):
+                nbr["special"] = "forge"
+                forges.append(nbr)
+                placed = True
+                break
+        idx += 2 if placed else 1
+    return forges
+
+
+def has_river_neighbor(t):
+    for e in range(6):
+        nc, nr = neighbor_coords(t["col"], t["row"], e)
+        nbr = board.get((nc, nr))
+        if nbr is not None and nbr["river"]:
+            return True
+    return False
+
+
+def generate_vineyards(n=2):
+    """Scan rows from the bottom of the map upward, looking for a plain
+    tile that sits next to a river. Place one, then jump 2 rows up and
+    scan again for the next."""
+    vineyards = []
+    row = ROWS - 1
+    while len(vineyards) < n and row >= 0:
+        candidates = [t for t in board.values()
+                      if t["row"] == row and is_empty_terrain(t) and has_river_neighbor(t)]
+        if candidates:
+            chosen = random.choice(candidates)
+            chosen["special"] = "vineyard"
+            vineyards.append(chosen)
+            row -= 2
+        else:
+            row -= 1
+    return vineyards
+
+
+def new_game():
+    """(Re)generate the board, terrain, hand, and all score counters from
+    scratch - used both at startup and by the Reroll map button."""
+    global board, river_tiles, forests, sawmills, cities, hills, mines, forges, vineyards
+    global hand, hand_is_source, selected_slot, first_tile_placed
+    global score, placement_cost_total, overdraw_cost_total, trash_cost_total
+    global shop_cost_total, undo_cost_total, final_bonus
+    global forest_powered_count, sawmill_powered_count, mine_powered_count, forge_powered_count
+    global won, won_bonus_applied, history
+
+    board = {}
+    for c in range(COLS):
+        for r in range(ROWS):
+            board[(c, r)] = {
+                "col": c, "row": r,
+                "roads": [],
+                "city": False,
+                "is_source": False,
+                "powered": False,
+                "river": False,
+                "river_edges": None,
+                "lake": False,
+                "special": None,
+                "hill": False,
+            }
+
+    river_tiles = generate_river()
+    generate_lakes()
+    forests, sawmills = generate_forest_and_sawmill()
+    cities = generate_cities()
+    hills = generate_hills()
+    mines = generate_mines(hills)
+    forges = generate_forges(cities)
+    vineyards = generate_vineyards()
+
+    hand = [draw_token(), draw_token(), draw_token(),
+            random.choice([[0, 2, 4], [1, 3, 5]]), None]
+    hand_is_source = [False, False, False, True, False]  # slot 3 is the power source
+    selected_slot = None
+    first_tile_placed = False
+
+    score = 0
+    placement_cost_total = 0
+    overdraw_cost_total = 0
+    trash_cost_total = 0
+    shop_cost_total = 0
+    undo_cost_total = 0
+    final_bonus = 0
+
+    forest_powered_count = 0
+    sawmill_powered_count = 0
+    mine_powered_count = 0
+    forge_powered_count = 0
+
+    won = False
+    won_bonus_applied = False
+    history = []
+
+
+new_game()
+
+# ---------------------------------------------------------------------------
+# GAME STATE
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# UI LAYOUT
+# ---------------------------------------------------------------------------
+
+HAND_SLOT_RECTS = [pygame.Rect(205 + i * 120, 690, 110, 90) for i in range(5)]
+
+UNDO_RECT = pygame.Rect(760, 80, 200, 44)
+TRASH_RECT = pygame.Rect(760, 132, 200, 44)
+OVERDRAW_RECT = pygame.Rect(760, 184, 200, 44)
+SHOP_RECTS = [pygame.Rect(760, 260 + i * 46, 200, 38) for i in range(4)]
+
+
+def find_tile(mouse_pos):
+    mx, my = mouse_pos
+    for tile in board.values():
+        cx, cy = hex_center(tile["col"], tile["row"])
+        if math.dist((mx, my), (cx, cy)) < HEX_SIZE:
+            return tile
+    return None
+
+
+# ---------------------------------------------------------------------------
+# NETWORK / SCORING
+# ---------------------------------------------------------------------------
+
+def update_power_network():
+    for tile in board.values():
+        tile["powered"] = False
+
+    sources = [t for t in board.values() if t["is_source"]]
+    visited = set()
+    queue = []
+    for s in sources:
+        s["powered"] = True
+        visited.add((s["col"], s["row"]))
+        queue.append(s)
+
+    while queue:
+        cur = queue.pop()
+        for edge in cur["roads"]:
+            nc, nr = neighbor_coords(cur["col"], cur["row"], edge)
+            nbr = board.get((nc, nr))
+            if nbr is None or (nc, nr) in visited:
+                continue
+            if (edge + 3) % 6 in nbr["roads"]:
+                nbr["powered"] = True
+                visited.add((nc, nr))
+                queue.append(nbr)
+
+
+def recompute_score():
+    global score, forest_powered_count, sawmill_powered_count
+    global mine_powered_count, forge_powered_count
+    powered_score = 0
+    forest_powered_count = 0
+    sawmill_powered_count = 0
+    mine_powered_count = 0
+    forge_powered_count = 0
+
+    for tile in board.values():
+        if tile["powered"]:
+            if tile["city"]:
+                powered_score += 10  # only cities (and, at game end, industry) score
+            if tile["special"] == "forest":
+                forest_powered_count += 1
+            elif tile["special"] == "sawmill":
+                sawmill_powered_count += 1
+            elif tile["special"] == "mine":
+                mine_powered_count += 1
+            elif tile["special"] == "forge":
+                forge_powered_count += 1
+            elif tile["special"] == "vineyard":
+                powered_score += 5  # optional bonus, doesn't gate the win
+
+    score = (powered_score + placement_cost_total + overdraw_cost_total
+             + trash_cost_total + shop_cost_total + undo_cost_total + final_bonus)
+
+
+def count_loose_ends():
+    loose = 0
+    for tile in board.values():
+        for edge in tile["roads"]:
+            nc, nr = neighbor_coords(tile["col"], tile["row"], edge)
+            nbr = board.get((nc, nr))
+            if nbr is None:
+                continue
+            if (edge + 3) % 6 not in nbr["roads"]:
+                loose += 1
+    return loose
+
+
+def check_win():
+    if not cities:
+        return False
+    return all(c["powered"] for c in cities)
+
+
+def refresh_win_state():
+    global won, won_bonus_applied, final_bonus
+    won = check_win()
+    if won and not won_bonus_applied:
+        loose = count_loose_ends()
+        bonus = (min(forest_powered_count, sawmill_powered_count) * 10
+                 + min(mine_powered_count, forge_powered_count) * 10)
+        final_bonus = bonus - loose
+        won_bonus_applied = True
+        recompute_score()
+    elif not won and won_bonus_applied:
+        won_bonus_applied = False
+        final_bonus = 0
+        recompute_score()
+
+
+# ---------------------------------------------------------------------------
+# HAND ACTIONS
+# ---------------------------------------------------------------------------
+
+def select_slot(i):
+    global selected_slot
+    if 0 <= i < 5 and hand[i] is not None:
+        selected_slot = None if selected_slot == i else i
+
+
+def deselect():
+    global selected_slot
+    selected_slot = None
+
+
+def rotate_selected():
+    if selected_slot is not None and hand[selected_slot] is not None:
+        hand[selected_slot] = rotate(hand[selected_slot])
+
+
+def place_selected_tile(tile):
+    global first_tile_placed, placement_cost_total, selected_slot
+
+    if selected_slot is None or hand[selected_slot] is None:
+        return
+
+    hand_before = list(hand)
+    source_before = list(hand_is_source)
+    is_source_tile = hand_is_source[selected_slot]
+
+    tile["roads"] = hand[selected_slot].copy()
+    if is_source_tile:
+        tile["is_source"] = True
+        first_tile_placed = True
+
+    cost = -3 if tile["hill"] else (-2 if tile["river"] else -1)
+    placement_cost_total += cost
+
+    hand[selected_slot] = None
+    hand_is_source[selected_slot] = False
+    if sum(1 for t in hand if t is not None) < 3:
+        empty = hand.index(None)
+        hand[empty] = draw_token()
+
+    history.append({
+        "tile": tile,
+        "was_source": is_source_tile,
+        "placement_cost": cost,
+        "hand_before": hand_before,
+        "source_before": source_before,
+    })
+
+    selected_slot = None
+    update_power_network()
+    recompute_score()
+    refresh_win_state()
+
+
+def trash_selected():
+    global selected_slot, trash_cost_total
+    if selected_slot is None or hand[selected_slot] is None:
+        return
+    if hand_is_source[selected_slot]:
+        return  # can't trash your powerhouse
+    hand[selected_slot] = draw_token()
+    trash_cost_total -= 1
+    selected_slot = None
+    recompute_score()
+
+
+def overdraw():
+    global overdraw_cost_total
+    count = sum(1 for t in hand if t is not None)
+    if count >= 5:
+        return
+    if count < 3:
+        cost = 0
+    elif count == 3:
+        cost = -2
+    else:
+        cost = -3
+    empty = hand.index(None)
+    hand[empty] = draw_token()
+    overdraw_cost_total += cost
+    recompute_score()
+
+
+def buy_shop_item(shape, price):
+    global selected_slot, shop_cost_total
+    if selected_slot is None or hand[selected_slot] is None:
+        return
+    if hand_is_source[selected_slot]:
+        return  # can't sell your powerhouse
+    hand[selected_slot] = list(shape)
+    shop_cost_total -= price
+    selected_slot = None
+    recompute_score()
+
+
+def undo_last_placement():
+    global first_tile_placed, placement_cost_total, undo_cost_total, hand, hand_is_source, selected_slot
+
+    if not history:
+        return
+
+    entry = history.pop()
+    tile = entry["tile"]
+    tile["roads"] = []
+
+    if entry["was_source"]:
+        tile["is_source"] = False
+        first_tile_placed = False
+
+    placement_cost_total -= entry["placement_cost"]
+    undo_cost_total -= 2
+    hand = list(entry["hand_before"])
+    hand_is_source = list(entry["source_before"])
+    selected_slot = None
+
+    update_power_network()
+    recompute_score()
+    refresh_win_state()
+
+
+# ---------------------------------------------------------------------------
+# DRAWING
+# ---------------------------------------------------------------------------
+
+def draw_forest_icon(cx, cy):
+    top = cy - 24
+    for i, scale in enumerate((1.0, 0.78, 0.56)):
+        w, h = 10 * scale, 8 * scale
+        ty = top + i * 6
+        pygame.draw.polygon(screen, FOREST_GREEN,
+                             [(cx - w, ty + h), (cx + w, ty + h), (cx, ty - h)])
+
+
+def draw_sawmill_icon(cx, cy):
+    center = (cx, cy - 20)
+    pygame.draw.circle(screen, SAWMILL_BROWN, center, 9, 2)
+    r = 7
+    pts = [(center[0] + r * math.cos(math.radians(-90 + 120 * i)),
+            center[1] + r * math.sin(math.radians(-90 + 120 * i))) for i in range(3)]
+    pygame.draw.polygon(screen, SAWMILL_BROWN, pts, 2)
+
+
+def draw_hill_icon(cx, cy):
+    top = cy - 22
+    pts = [(cx - 14, top + 16), (cx + 14, top + 16), (cx, top - 10)]
+    pygame.draw.polygon(screen, HILL_BROWN, pts)
+    cap = [(cx - 5, top - 1), (cx + 5, top - 1), (cx, top - 10)]
+    pygame.draw.polygon(screen, WHITE, cap)
+
+
+def draw_mine_icon(cx, cy):
+    r = 11
+    top = cy - 18
+    pts = [(cx - r, top)]
+    for deg in range(180, 361, 20):
+        rad = math.radians(deg)
+        pts.append((cx + r * math.cos(rad), top + r * math.sin(rad)))
+    pygame.draw.polygon(screen, MINE_COLOR, pts)
+    pygame.draw.circle(screen, TUNNEL_DARK, (int(cx), int(top + 2)), 5)
+
+
+def draw_forge_icon(cx, cy):
+    top_w, bot_w, h = 15, 7, 12
+    top_y = cy - 26
+    bot_y = top_y + h
+    pts = [(cx - top_w, top_y), (cx + top_w, top_y),
+           (cx + bot_w, bot_y), (cx - bot_w, bot_y)]
+    pygame.draw.polygon(screen, FORGE_COLOR, pts)
+
+
+def draw_vineyard_icon(cx, cy):
+    top = cy - 24
+    for dx, dy in ((-6, 0), (6, 0), (0, 8)):
+        pygame.draw.circle(screen, VINEYARD_PURPLE, (int(cx + dx), int(top + dy)), 4)
+
+
+def draw_tile(tile):
+    cx, cy = hex_center(tile["col"], tile["row"])
+    corners = hex_points(cx, cy)
+
+    if tile["lake"]:
+        fill = LAKE_BLUE
+    elif tile["city"]:
+        fill = YELLOW if tile["roads"] else GREEN
+    elif tile["powered"]:
+        fill = YELLOW
+    elif tile["roads"]:
+        fill = LIGHT_GRAY
+    else:
+        fill = GRAY
+
+    pygame.draw.polygon(screen, fill, corners)
+    pygame.draw.polygon(screen, BLACK, corners, 2)
+
+    if tile["river"] and not tile["lake"]:
+        p1 = edge_point(cx, cy, tile["river_edges"][0])
+        p2 = edge_point(cx, cy, tile["river_edges"][1])
+        pygame.draw.line(screen, RIVER_BLUE, p1, p2, 6)
+
+    for edge in tile["roads"]:
+        p = edge_point(cx, cy, edge)
+        pygame.draw.line(screen, BLUE, (cx, cy), p, 8)
+        pygame.draw.circle(screen, RED, (int(p[0]), int(p[1])), 7)
+
+    if tile["is_source"]:
+        pygame.draw.circle(screen, GOLD, (int(cx), int(cy)), 14)
+        pygame.draw.circle(screen, BLACK, (int(cx), int(cy)), 14, 2)
+    elif tile["roads"]:
+        pygame.draw.circle(screen, BLUE, (int(cx), int(cy)), 6)
+
+    if tile["special"] == "forest":
+        draw_forest_icon(cx, cy)
+    elif tile["special"] == "sawmill":
+        draw_sawmill_icon(cx, cy)
+    elif tile["special"] == "mine":
+        draw_mine_icon(cx, cy)
+    elif tile["special"] == "forge":
+        draw_forge_icon(cx, cy)
+    elif tile["special"] == "vineyard":
+        draw_vineyard_icon(cx, cy)
+
+    if tile["hill"]:
+        draw_hill_icon(cx, cy)
+
+
+def draw_mini_hex(center, roads, ring_color=GRAY, radius=30, center_dot_color=None):
+    cx, cy = center
+    pygame.draw.circle(screen, ring_color, center, radius)
+    for e in roads:
+        a1 = math.radians(60 * e)
+        a2 = math.radians(60 * (e + 1))
+        mx = cx + radius * (math.cos(a1) + math.cos(a2)) / 2
+        my = cy + radius * (math.sin(a1) + math.sin(a2)) / 2
+        pygame.draw.line(screen, BLUE, center, (mx, my), max(3, radius // 6))
+    if center_dot_color:
+        r = max(4, radius // 4)
+        pygame.draw.circle(screen, center_dot_color, center, r)
+        pygame.draw.circle(screen, BLACK, center, r, 1)
+
+
+def draw_hand():
+    for i, rect in enumerate(HAND_SLOT_RECTS):
+        pygame.draw.rect(screen, WHITE, rect)
+        selected = (selected_slot == i)
+        if selected:
+            border_color, border_width = BLUE, 3
+        elif hand_is_source[i]:
+            border_color, border_width = GOLD, 3
+        else:
+            border_color, border_width = BLACK, 2
+        pygame.draw.rect(screen, border_color, rect, border_width)
+
+        circle_center = (rect.x + 16, rect.y + 16)
+        pygame.draw.circle(screen, BLUE if selected else LIGHT_GRAY, circle_center, 12)
+        pygame.draw.circle(screen, BLACK, circle_center, 12, 1)
+        num = SMALL_FONT.render(str(i + 1), True, WHITE if selected else BLACK)
+        screen.blit(num, num.get_rect(center=circle_center))
+
+        if hand[i] is not None:
+            mini_center = (rect.centerx, rect.centery + 6)
+            draw_mini_hex(mini_center, hand[i], radius=28,
+                          center_dot_color=GOLD if hand_is_source[i] else None)
+        else:
+            empty_label = SMALL_FONT.render("empty", True, GRAY)
+            screen.blit(empty_label, empty_label.get_rect(center=rect.center))
+
+    hint = SMALL_FONT.render(
+        "1-5 select | 6 deselect | R rotate selected | D overdraw", True, BLACK)
+    screen.blit(hint, (205, 665))
+
+
+def draw_undo_button():
+    active = len(history) > 0
+    color = DARK_RED if active else GRAY
+    pygame.draw.rect(screen, color, UNDO_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, UNDO_RECT, 2, border_radius=8)
+    label = FONT.render("Undo last (-2)", True, WHITE)
+    screen.blit(label, label.get_rect(center=UNDO_RECT.center))
+
+
+def draw_trash_button():
+    pygame.draw.rect(screen, DARK_RED, TRASH_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, TRASH_RECT, 2, border_radius=8)
+    label = FONT.render("Trash selected (-1)", True, WHITE)
+    screen.blit(label, label.get_rect(center=TRASH_RECT.center))
+
+
+def draw_overdraw_button():
+    count = sum(1 for t in hand if t is not None)
+    if count >= 5:
+        text, color = "Overdraw (D): full", GRAY
+    elif count < 3:
+        text, color = "Overdraw (D): free", OK_GREEN
+    elif count == 3:
+        text, color = "Overdraw (D): -2", DARK_RED
+    else:
+        text, color = "Overdraw (D): -3", DARK_RED
+    pygame.draw.rect(screen, color, OVERDRAW_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, OVERDRAW_RECT, 2, border_radius=8)
+    label = FONT.render(text, True, WHITE)
+    screen.blit(label, label.get_rect(center=OVERDRAW_RECT.center))
+
+
+def draw_shop():
+    label = SMALL_FONT.render("Shop: select a hand tile, then buy", True, BLACK)
+    screen.blit(label, (760, 236))
+    for rect, (shape, price) in zip(SHOP_RECTS, SHOP_ITEMS):
+        pygame.draw.rect(screen, WHITE, rect)
+        pygame.draw.rect(screen, SHOP_PURPLE, rect, 2)
+        draw_mini_hex((rect.x + 26, rect.centery), shape, radius=14)
+        price_label = FONT.render(f"-{price}", True, BLACK)
+        screen.blit(price_label, (rect.x + 60, rect.y + 8))
+
+
+def draw_hud():
+    y = SHOP_RECTS[-1].bottom + 16
+    lines = [
+        f"Score: {score}",
+        f"Cities powered: {sum(1 for c in cities if c['powered'])}/{len(cities)}",
+        f"Forest/Sawmill: {forest_powered_count}/{sawmill_powered_count}",
+        f"Mine/Forge: {mine_powered_count}/{forge_powered_count}",
+        f"Hand: {sum(1 for t in hand if t is not None)}/5",
+    ]
+    for line in lines:
+        screen.blit(FONT.render(line, True, BLACK), (760, y))
+        y += 28
+
+    if not first_tile_placed:
+        hint = SMALL_FONT.render("First placement = power source!", True, DARK_RED)
+        screen.blit(hint, (760, y + 6))
+
+
+def draw():
+    screen.fill(WHITE)
+
+    for tile in board.values():
+        draw_tile(tile)
+
+    draw_undo_button()
+    draw_trash_button()
+    draw_overdraw_button()
+    draw_shop()
+    draw_hud()
+    draw_hand()
+
+    if won:
+        text = BIG_FONT.render("ALL CITIES CONNECTED & POWERED!", True, (20, 120, 20))
+        screen.blit(text, (30, 20))
+        breakdown = FONT.render(f"Final score: {score}", True, (20, 120, 20))
+        screen.blit(breakdown, (30, 66))
+
+    pygame.display.flip()
+
+
+# ---------------------------------------------------------------------------
+# GAME LOOP
+# ---------------------------------------------------------------------------
+
+KEY_TO_SLOT = {
+    pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2, pygame.K_4: 3, pygame.K_5: 4,
+}
+
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        elif event.type == pygame.KEYDOWN:
+            if event.key in KEY_TO_SLOT:
+                select_slot(KEY_TO_SLOT[event.key])
+            elif event.key == pygame.K_6:
+                deselect()
+            elif event.key == pygame.K_r:
+                rotate_selected()
+            elif event.key == pygame.K_d:
+                overdraw()
+
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            pos = event.pos
+
+            if UNDO_RECT.collidepoint(pos):
+                undo_last_placement()
+            elif TRASH_RECT.collidepoint(pos):
+                trash_selected()
+            elif OVERDRAW_RECT.collidepoint(pos):
+                overdraw()
+            elif any(r.collidepoint(pos) for r in SHOP_RECTS):
+                idx = next(i for i, r in enumerate(SHOP_RECTS) if r.collidepoint(pos))
+                shape, price = SHOP_ITEMS[idx]
+                buy_shop_item(shape, price)
+            elif any(r.collidepoint(pos) for r in HAND_SLOT_RECTS):
+                idx = next(i for i, r in enumerate(HAND_SLOT_RECTS) if r.collidepoint(pos))
+                select_slot(idx)
+            else:
+                tile = find_tile(pos)
+                if tile and not tile["roads"] and not tile["lake"]:
+                    place_selected_tile(tile)
+
+    draw()
+    clock.tick(60)
+
+pygame.quit()

@@ -338,6 +338,7 @@ new_game()
 
 HAND_SLOT_RECTS = [pygame.Rect(205 + i * 120, 690, 110, 90) for i in range(5)]
 
+REROLL_RECT = pygame.Rect(760, 24, 200, 44)
 UNDO_RECT = pygame.Rect(760, 80, 200, 44)
 TRASH_RECT = pygame.Rect(760, 132, 200, 44)
 OVERDRAW_RECT = pygame.Rect(760, 184, 200, 44)
@@ -720,6 +721,13 @@ def draw_hand():
     screen.blit(hint, (205, 665))
 
 
+def draw_reroll_button():
+    pygame.draw.rect(screen, SHOP_PURPLE, REROLL_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, REROLL_RECT, 2, border_radius=8)
+    label = FONT.render("Reroll map (N)", True, WHITE)
+    screen.blit(label, label.get_rect(center=REROLL_RECT.center))
+
+
 def draw_undo_button():
     active = len(history) > 0
     color = DARK_RED if active else GRAY
@@ -787,6 +795,7 @@ def draw():
     for tile in board.values():
         draw_tile(tile)
 
+    draw_reroll_button()
     draw_undo_button()
     draw_trash_button()
     draw_overdraw_button()
@@ -826,11 +835,15 @@ while running:
                 rotate_selected()
             elif event.key == pygame.K_d:
                 overdraw()
+            elif event.key == pygame.K_n:
+                new_game()
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             pos = event.pos
 
-            if UNDO_RECT.collidepoint(pos):
+            if REROLL_RECT.collidepoint(pos):
+                new_game()
+            elif UNDO_RECT.collidepoint(pos):
                 undo_last_placement()
             elif TRASH_RECT.collidepoint(pos):
                 trash_selected()

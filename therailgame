@@ -197,7 +197,9 @@ cities = generate_cities()
 # GAME STATE
 # ---------------------------------------------------------------------------
 
-hand = [draw_token(), draw_token(), draw_token(), None, None]
+hand = [draw_token(), draw_token(), draw_token(),
+        random.choice([[0, 2, 4], [1, 3, 5]]), None]
+hand_is_source = [False, False, False, True, False]  # slot 3 is the power source
 selected_slot = None
 first_tile_placed = False
 
@@ -346,29 +348,29 @@ def place_selected_tile(tile):
         return
 
     hand_before = list(hand)
-    was_source = False
+    source_before = list(hand_is_source)
+    is_source_tile = hand_is_source[selected_slot]
 
-    if not first_tile_placed:
-        tile["roads"] = random.choice([[0, 2, 4], [1, 3, 5]])
+    tile["roads"] = hand[selected_slot].copy()
+    if is_source_tile:
         tile["is_source"] = True
         first_tile_placed = True
-        was_source = True
-    else:
-        tile["roads"] = hand[selected_slot].copy()
 
     cost = -2 if tile["river"] else -1
     placement_cost_total += cost
 
     hand[selected_slot] = None
+    hand_is_source[selected_slot] = False
     if sum(1 for t in hand if t is not None) < 3:
         empty = hand.index(None)
         hand[empty] = draw_token()
 
     history.append({
         "tile": tile,
-        "was_source": was_source,
+        "was_source": is_source_tile,
         "placement_cost": cost,
         "hand_before": hand_before,
+        "source_before": source_before,
     })
 
     selected_slot = None
@@ -381,6 +383,8 @@ def trash_selected():
     global selected_slot, trash_cost_total
     if selected_slot is None or hand[selected_slot] is None:
         return
+    if hand_is_source[selected_slot]:
+        return  # can't trash your powerhouse
     hand[selected_slot] = draw_token()
     trash_cost_total -= 1
     selected_slot = None
@@ -408,6 +412,8 @@ def buy_shop_item(shape, price):
     global selected_slot, shop_cost_total
     if selected_slot is None or hand[selected_slot] is None:
         return
+    if hand_is_source[selected_slot]:
+        return  # can't sell your powerhouse
     hand[selected_slot] = list(shape)
     shop_cost_total -= price
     selected_slot = None
@@ -415,7 +421,7 @@ def buy_shop_item(shape, price):
 
 
 def undo_last_placement():
-    global first_tile_placed, placement_cost_total, undo_cost_total, hand, selected_slot
+    global first_tile_placed, placement_cost_total, undo_cost_total, hand, hand_is_source, selected_slot
 
     if not history:
         return
@@ -431,6 +437,7 @@ def undo_last_placement():
     placement_cost_total -= entry["placement_cost"]
     undo_cost_total -= 2
     hand = list(entry["hand_before"])
+    hand_is_source = list(entry["source_before"])
     selected_slot = None
 
     update_power_network()
@@ -500,7 +507,7 @@ def draw_tile(tile):
         draw_sawmill_icon(cx, cy)
 
 
-def draw_mini_hex(center, roads, ring_color=GRAY, radius=30):
+def draw_mini_hex(center, roads, ring_color=GRAY, radius=30, center_dot_color=None):
     cx, cy = center
     pygame.draw.circle(screen, ring_color, center, radius)
     for e in roads:
@@ -509,13 +516,23 @@ def draw_mini_hex(center, roads, ring_color=GRAY, radius=30):
         mx = cx + radius * (math.cos(a1) + math.cos(a2)) / 2
         my = cy + radius * (math.sin(a1) + math.sin(a2)) / 2
         pygame.draw.line(screen, BLUE, center, (mx, my), max(3, radius // 6))
+    if center_dot_color:
+        r = max(4, radius // 4)
+        pygame.draw.circle(screen, center_dot_color, center, r)
+        pygame.draw.circle(screen, BLACK, center, r, 1)
 
 
 def draw_hand():
     for i, rect in enumerate(HAND_SLOT_RECTS):
         pygame.draw.rect(screen, WHITE, rect)
         selected = (selected_slot == i)
-        pygame.draw.rect(screen, BLUE if selected else BLACK, rect, 3 if selected else 2)
+        if selected:
+            border_color, border_width = BLUE, 3
+        elif hand_is_source[i]:
+            border_color, border_width = GOLD, 3
+        else:
+            border_color, border_width = BLACK, 2
+        pygame.draw.rect(screen, border_color, rect, border_width)
 
         circle_center = (rect.x + 16, rect.y + 16)
         pygame.draw.circle(screen, BLUE if selected else LIGHT_GRAY, circle_center, 12)
@@ -525,7 +542,8 @@ def draw_hand():
 
         if hand[i] is not None:
             mini_center = (rect.centerx, rect.centery + 6)
-            draw_mini_hex(mini_center, hand[i], radius=28)
+            draw_mini_hex(mini_center, hand[i], radius=28,
+                          center_dot_color=GOLD if hand_is_source[i] else None)
         else:
             empty_label = SMALL_FONT.render("empty", True, GRAY)
             screen.blit(empty_label, empty_label.get_rect(center=rect.center))

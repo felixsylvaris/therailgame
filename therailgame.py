@@ -1,4 +1,4 @@
-# v5 with reroll map
+## v6 now with variables
 
 import pygame
 import math
@@ -41,6 +41,40 @@ HEX_SIZE = 40
 COLS = 10
 ROWS = 8
 NUM_CITIES = 5
+
+# ---------------------------------------------------------------------------
+# TUNABLE CONSTANTS - change these to reshape the map or the economy.
+# Everything below is read once at generation/placement time, so tweaking a
+# number here and rerunning (or pressing Reroll) is the whole modding loop.
+# ---------------------------------------------------------------------------
+
+# Map generation counts
+NUM_HILLS = 4
+NUM_MINES = 2
+NUM_FORGES = 2
+NUM_VINEYARDS = 2
+MAX_LAKES = 4
+
+# Placement costs (charged the instant a tile is placed)
+PLACEMENT_COST = -1
+RIVER_PLACEMENT_COST = -2
+HILL_PLACEMENT_COST = -3
+
+# Live scoring (counted continuously, the moment a tile is powered)
+CITY_POWER_SCORE = 10
+VINEYARD_POWER_SCORE = 5
+
+# One-time bonuses/penalties applied the moment all cities are powered
+FOREST_SAWMILL_PAIR_BONUS = 10
+MINE_FORGE_PAIR_BONUS = 10
+OUT_CON_BON = 3    # per road-arm that reaches the map border - getting OUT is good
+UNFINISHED = -3    # per road-arm that dangles into a tile that doesn't connect back
+
+# Hand economy costs
+TRASH_COST = -1
+UNDO_COST = -2
+OVERDRAW_COST_AT_3 = -2   # cost to draw a 4th tile when you already hold 3
+OVERDRAW_COST_AT_4 = -3   # cost to draw a 5th tile when you already hold 4
 
 # ---------------------------------------------------------------------------
 # HEX GEOMETRY
@@ -139,7 +173,7 @@ def generate_river():
     return river_tiles
 
 
-def generate_lakes(max_lakes=4):
+def generate_lakes(max_lakes=MAX_LAKES):
     placed = 0
     prev_was_river = False
     for tile in sorted(board.values(), key=lambda t: (t["row"], t["col"])):
@@ -185,7 +219,7 @@ def is_empty_terrain(t):
             and not t["hill"] and t["special"] is None)
 
 
-def generate_hills(n=4):
+def generate_hills(n=NUM_HILLS):
     """4 hills on the top half of the map, never on the very first row,
     first column, or last column - and never on another feature."""
     candidates = [
@@ -199,7 +233,7 @@ def generate_hills(n=4):
     return chosen
 
 
-def generate_mines(hill_tiles, n=2):
+def generate_mines(hill_tiles, n=NUM_MINES):
     """Walk the hills in order; drop a mine on the first empty neighbor
     of each. Skip a hill with no empty neighbor. Run out of hills before
     reaching n and you simply end up with fewer mines."""
@@ -217,7 +251,7 @@ def generate_mines(hill_tiles, n=2):
     return mines
 
 
-def generate_forges(city_tiles, n=2):
+def generate_forges(city_tiles, n=NUM_FORGES):
     """Scan cities from the bottom of the map upward. Drop a forge on the
     first empty neighbor found. After a successful placement, skip the
     very next city and try the one after that; after a failed attempt,
@@ -249,7 +283,7 @@ def has_river_neighbor(t):
     return False
 
 
-def generate_vineyards(n=2):
+def generate_vineyards(n=NUM_VINEYARDS):
     """Scan rows from the bottom of the map upward, looking for a plain
     tile that sits next to a river. Place one, then jump 2 rows up and
     scan again for the next."""
@@ -328,6 +362,7 @@ def new_game():
 
 
 new_game()
+show_instructions = True
 
 # ---------------------------------------------------------------------------
 # GAME STATE
@@ -397,7 +432,7 @@ def recompute_score():
     for tile in board.values():
         if tile["powered"]:
             if tile["city"]:
-                powered_score += 10  # only cities (and, at game end, industry) score
+                powered_score += CITY_POWER_SCORE  # only cities (and, at game end, industry) score
             if tile["special"] == "forest":
                 forest_powered_count += 1
             elif tile["special"] == "sawmill":
@@ -407,23 +442,26 @@ def recompute_score():
             elif tile["special"] == "forge":
                 forge_powered_count += 1
             elif tile["special"] == "vineyard":
-                powered_score += 5  # optional bonus, doesn't gate the win
+                powered_score += VINEYARD_POWER_SCORE  # optional bonus, doesn't gate the win
 
     score = (powered_score + placement_cost_total + overdraw_cost_total
              + trash_cost_total + shop_cost_total + undo_cost_total + final_bonus)
 
 
-def count_loose_ends():
-    loose = 0
+def evaluate_route_ends():
+    """Net score from every road arm's endpoint: reaching the map border is
+    a clean exit and scores OUT_CON_BON; dangling into a tile that doesn't
+    connect back is a genuinely unfinished route and costs UNFINISHED."""
+    total = 0
     for tile in board.values():
         for edge in tile["roads"]:
             nc, nr = neighbor_coords(tile["col"], tile["row"], edge)
             nbr = board.get((nc, nr))
             if nbr is None:
-                continue
-            if (edge + 3) % 6 not in nbr["roads"]:
-                loose += 1
-    return loose
+                total += OUT_CON_BON
+            elif (edge + 3) % 6 not in nbr["roads"]:
+                total += UNFINISHED
+    return total
 
 
 def check_win():
@@ -436,10 +474,10 @@ def refresh_win_state():
     global won, won_bonus_applied, final_bonus
     won = check_win()
     if won and not won_bonus_applied:
-        loose = count_loose_ends()
-        bonus = (min(forest_powered_count, sawmill_powered_count) * 10
-                 + min(mine_powered_count, forge_powered_count) * 10)
-        final_bonus = bonus - loose
+        route_ends = evaluate_route_ends()
+        bonus = (min(forest_powered_count, sawmill_powered_count) * FOREST_SAWMILL_PAIR_BONUS
+                 + min(mine_powered_count, forge_powered_count) * MINE_FORGE_PAIR_BONUS)
+        final_bonus = bonus + route_ends
         won_bonus_applied = True
         recompute_score()
     elif not won and won_bonus_applied:
@@ -483,7 +521,8 @@ def place_selected_tile(tile):
         tile["is_source"] = True
         first_tile_placed = True
 
-    cost = -3 if tile["hill"] else (-2 if tile["river"] else -1)
+    cost = HILL_PLACEMENT_COST if tile["hill"] else (
+        RIVER_PLACEMENT_COST if tile["river"] else PLACEMENT_COST)
     placement_cost_total += cost
 
     hand[selected_slot] = None
@@ -513,7 +552,7 @@ def trash_selected():
     if hand_is_source[selected_slot]:
         return  # can't trash your powerhouse
     hand[selected_slot] = draw_token()
-    trash_cost_total -= 1
+    trash_cost_total += TRASH_COST
     selected_slot = None
     recompute_score()
 
@@ -526,9 +565,9 @@ def overdraw():
     if count < 3:
         cost = 0
     elif count == 3:
-        cost = -2
+        cost = OVERDRAW_COST_AT_3
     else:
-        cost = -3
+        cost = OVERDRAW_COST_AT_4
     empty = hand.index(None)
     hand[empty] = draw_token()
     overdraw_cost_total += cost
@@ -562,7 +601,7 @@ def undo_last_placement():
         first_tile_placed = False
 
     placement_cost_total -= entry["placement_cost"]
-    undo_cost_total -= 2
+    undo_cost_total += UNDO_COST
     hand = list(entry["hand_before"])
     hand_is_source = list(entry["source_before"])
     selected_slot = None
@@ -735,14 +774,14 @@ def draw_undo_button():
     color = DARK_RED if active else GRAY
     pygame.draw.rect(screen, color, UNDO_RECT, border_radius=8)
     pygame.draw.rect(screen, BLACK, UNDO_RECT, 2, border_radius=8)
-    label = FONT.render("Undo last (-2)", True, WHITE)
+    label = FONT.render(f"Undo last ({UNDO_COST})", True, WHITE)
     screen.blit(label, label.get_rect(center=UNDO_RECT.center))
 
 
 def draw_trash_button():
     pygame.draw.rect(screen, DARK_RED, TRASH_RECT, border_radius=8)
     pygame.draw.rect(screen, BLACK, TRASH_RECT, 2, border_radius=8)
-    label = FONT.render("Trash selected (-1)", True, WHITE)
+    label = FONT.render(f"Trash selected ({TRASH_COST})", True, WHITE)
     screen.blit(label, label.get_rect(center=TRASH_RECT.center))
 
 
@@ -753,9 +792,9 @@ def draw_overdraw_button():
     elif count < 3:
         text, color = "Overdraw (D): free", OK_GREEN
     elif count == 3:
-        text, color = "Overdraw (D): -2", DARK_RED
+        text, color = f"Overdraw (D): {OVERDRAW_COST_AT_3}", DARK_RED
     else:
-        text, color = "Overdraw (D): -3", DARK_RED
+        text, color = f"Overdraw (D): {OVERDRAW_COST_AT_4}", DARK_RED
     pygame.draw.rect(screen, color, OVERDRAW_RECT, border_radius=8)
     pygame.draw.rect(screen, BLACK, OVERDRAW_RECT, 2, border_radius=8)
     label = FONT.render(text, True, WHITE)
@@ -791,6 +830,43 @@ def draw_hud():
         screen.blit(hint, (760, y + 6))
 
 
+INSTRUCTION_LINES = [
+    "HEX ROAD BUILDER",
+    "",
+    "Goal: power every city (yellow icon) by connecting a road network",
+    "back to your gold power-source tile in the hand.",
+    "",
+    "Hand: click or press 1-5 to select a tile, R to rotate it, then",
+    "click a board hex to place it. 6 deselects.",
+    "",
+    "Costs: placing a tile is -1 (river -2, hill -3). Trash a selected",
+    "tile for -1, or spend score at the Shop for an exact shape.",
+    "D / Overdraw draws a spare tile: free below 3 in hand, pricier at",
+    "4 and 5. Undo the last placement for -2.",
+    "",
+    "Scoring: only powered cities, vineyards, and matched industry",
+    "pairs (forest/sawmill, mine/forge) earn points. Roads that reach",
+    f"the map edge score a bonus ({OUT_CON_BON:+d} each); roads that dangle",
+    f"into a tile that doesn't connect back cost you ({UNFINISHED:+d} each).",
+    "",
+    "Press SPACE to start",
+]
+
+
+def draw_instructions_overlay():
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((10, 10, 15, 215))
+    screen.blit(overlay, (0, 0))
+
+    y = 120
+    for i, line in enumerate(INSTRUCTION_LINES):
+        font = BIG_FONT if i == 0 else FONT
+        color = WHITE if line != "Press SPACE to start" else (250, 220, 90)
+        rendered = font.render(line, True, color)
+        screen.blit(rendered, rendered.get_rect(center=(WIDTH // 2, y)))
+        y += 46 if i == 0 else 28
+
+
 def draw():
     screen.fill(WHITE)
 
@@ -811,6 +887,9 @@ def draw():
         breakdown = FONT.render(f"Final score: {score}", True, (20, 120, 20))
         screen.blit(breakdown, (30, 66))
 
+    if show_instructions:
+        draw_instructions_overlay()
+
     pygame.display.flip()
 
 
@@ -829,6 +908,11 @@ while running:
             running = False
 
         elif event.type == pygame.KEYDOWN:
+            if show_instructions:
+                if event.key == pygame.K_SPACE:
+                    show_instructions = False
+                continue
+
             if event.key in KEY_TO_SLOT:
                 select_slot(KEY_TO_SLOT[event.key])
             elif event.key == pygame.K_6:
@@ -841,6 +925,8 @@ while running:
                 new_game()
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
+            if show_instructions:
+                continue
             pos = event.pos
 
             if REROLL_RECT.collidepoint(pos):

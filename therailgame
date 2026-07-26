@@ -14,14 +14,20 @@ GREEN = (50, 150, 80)
 BLUE = (50, 100, 200)
 RED = (220, 50, 50)
 GRAY = (160, 160, 160)
-YELLOW = (250, 210, 60)      # powered tile highlight
-GOLD = (230, 170, 20)        # power source dot
-DARK_RED = (150, 30, 30)     # bin
-LIGHT_GRAY = (210, 210, 210)
+LIGHT_GRAY = (205, 205, 205)   # built but not yet powered
+YELLOW = (250, 210, 60)        # powered tile / built city highlight
+GOLD = (230, 170, 20)          # power source dot
+DARK_RED = (150, 30, 30)       # bin
+RIVER_BLUE = (70, 150, 220)
+LAKE_BLUE = (35, 90, 165)
+FOREST_GREEN = (25, 110, 45)
+SAWMILL_BROWN = (120, 70, 20)
+STORAGE_PURPLE = (110, 80, 170)
 
 clock = pygame.time.Clock()
-FONT = pygame.font.SysFont(None, 32)
-BIG_FONT = pygame.font.SysFont(None, 60)
+FONT = pygame.font.SysFont(None, 28)
+SMALL_FONT = pygame.font.SysFont(None, 22)
+BIG_FONT = pygame.font.SysFont(None, 54)
 
 HEX_SIZE = 40
 COLS = 10
@@ -61,12 +67,12 @@ def edge_point(cx, cy, edge):
 # Offset-coordinate neighbor table for a flat-top "odd-q" hex grid
 # (odd columns are shifted down by half a row, matching hex_center above).
 NEIGHBOR_OFFSETS = {
-    0: {"even": (1, 0),  "odd": (1, 1)},   # lower-right
-    1: {"even": (0, 1),  "odd": (0, 1)},   # down
-    2: {"even": (-1, 0), "odd": (-1, 1)},  # lower-left
-    3: {"even": (-1, -1), "odd": (-1, 0)}, # upper-left
-    4: {"even": (0, -1), "odd": (0, -1)},  # up
-    5: {"even": (1, -1), "odd": (1, 0)},   # upper-right
+    0: {"even": (1, 0),  "odd": (1, 1)},    # lower-right
+    1: {"even": (0, 1),  "odd": (0, 1)},    # down
+    2: {"even": (-1, 0), "odd": (-1, 1)},   # lower-left
+    3: {"even": (-1, -1), "odd": (-1, 0)},  # upper-left
+    4: {"even": (0, -1), "odd": (0, -1)},   # up
+    5: {"even": (1, -1), "odd": (1, 0)},    # upper-right
 }
 
 
@@ -77,32 +83,42 @@ def neighbor_coords(col, row, edge):
 
 
 # ---------------------------------------------------------------------------
-# ROAD TOKENS  (5- and 6-armed tiles removed - too expensive for this economy)
+# ROAD TOKENS  (5- and 6-armed tiles are forbidden - no budget for them)
 # ---------------------------------------------------------------------------
 
+# (shape, weight) - higher weight = more common. Tune these numbers to
+# rebalance the deck instead of copy-pasting duplicate entries. Crosses
+# are powerful (they connect on 4 sides at once) so they're weighted low;
+# straights/curves are the bread-and-butter tile so they're weighted high.
 TOKENS = [
-    [0, 3],[0, 3],[0, 3],[0, 3],       # straight
-    [1, 2],       # sharp curve
-    [0, 2],       # curve
-    [0, 2, 4],    # Y road
-    [0, 1, 3],    # another Y
-    [0, 1, 2, 3],[0,1,3,4],[0,1,3,5], # crossroads K,Peace,X
-    [0] # cull the sack for R1 zoning
-    [1, 3],
-    [0, 3, 5],
+    ([0, 3], 5),        # straight
+    ([1, 3], 4),        # gentle curve
+    ([0, 2], 4),        # gentle curve
+    ([1, 2], 3),        # sharp curve
+    ([0], 2),           # dead-end cul-de-sac zoning tile
+    ([0, 2, 4], 2),     # Y road
+    ([0, 1, 3], 2),     # Y road
+    ([0, 3, 5], 2),     # Y road
+    ([0, 1, 2, 3], 1),  # crossroads (K) - rare, no budget for many
+    ([0, 1, 3, 4], 1),  # crossroads (peace) - rare
+    ([0, 1, 3, 5], 1),  # crossroads (X) - rare
 ]
+_TOKEN_SHAPES = [shape for shape, _ in TOKENS]
+_TOKEN_WEIGHTS = [weight for _, weight in TOKENS]
+
+
+# random.choices() with weights - still fully random, never cycles, just
+# skews the odds toward the cheaper/simpler shapes.
+def draw_token():
+    return random.choices(_TOKEN_SHAPES, weights=_TOKEN_WEIGHTS, k=1)[0].copy()
 
 
 def rotate(token):
     return [(x + 1) % 6 for x in token]
 
 
-def draw_token():
-    return random.choice(TOKENS).copy()
-
-
 # ---------------------------------------------------------------------------
-# BOARD / GAME STATE
+# BOARD CREATION
 # ---------------------------------------------------------------------------
 
 board = {}
@@ -115,18 +131,133 @@ for c in range(COLS):
             "city": random.random() < 0.10,
             "is_source": False,
             "powered": False,
+            "river": False,
+            "river_edges": None,
+            "lake": False,
+            "special": None,        # "forest" | "sawmill" | None
+            "river_charged": False,
         }
 
+
+def generate_river():
+    """Start at a random top-row tile and snake downward, picking a new
+    exit edge (2, 3 or 4) at each step, until it flows off the board."""
+    start_col = random.randrange(COLS)
+    tile = board[(start_col, 0)]
+    entry_edge = 4   # symbolically "arrives from off-map, above"
+    river_tiles = []
+    visited = set()
+
+    while tile is not None and (tile["col"], tile["row"]) not in visited:
+        if tile["city"]:
+            break  # don't run a river through a city
+        exit_edge = random.choice([0, 1, 2])  # the three downward-facing edges
+        tile["river"] = True
+        tile["river_edges"] = [entry_edge, exit_edge]
+        river_tiles.append(tile)
+        visited.add((tile["col"], tile["row"]))
+
+        nc, nr = neighbor_coords(tile["col"], tile["row"], exit_edge)
+        next_tile = board.get((nc, nr))
+        if next_tile is None:
+            break  # reached rock bottom (or an edge) - river ends
+        entry_edge = (exit_edge + 3) % 6
+        tile = next_tile
+
+    return river_tiles
+
+
+def generate_lakes(river_tiles, max_lakes=4):
+    """Scatter up to `max_lakes` lake tiles. Base odds are tiny, but a
+    river tile has a decent chance, and the tile right after a river
+    tile (in scan order) is likelier too, so lakes cluster near rivers
+    or grow into small multi-hex bodies of water."""
+    placed = 0
+    prev_was_river = False
+
+    for tile in sorted(board.values(), key=lambda t: (t["row"], t["col"])):
+        if placed >= max_lakes:
+            break
+        if tile["city"]:
+            prev_was_river = tile["river"]
+            continue
+
+        if tile["river"]:
+            prob = 0.15
+        elif prev_was_river:
+            prob = 0.25
+        else:
+            prob = 0.01
+
+        if random.random() < prob:
+            tile["lake"] = True
+            placed += 1
+
+        prev_was_river = tile["river"]
+
+    return placed
+
+
+def generate_forest_and_sawmill():
+    """2 forest tiles biased to the left half of the map, 2 sawmill
+    tiles biased to the right half."""
+    def usable(t):
+        return not t["city"] and not t["lake"] and not t["river"]
+
+    left_pool = [t for t in board.values() if usable(t) and t["col"] < COLS // 2]
+    right_pool = [t for t in board.values() if usable(t) and t["col"] >= COLS // 2]
+
+    forest_tiles = random.sample(left_pool, min(2, len(left_pool)))
+    sawmill_tiles = random.sample(right_pool, min(2, len(right_pool)))
+
+    for t in forest_tiles:
+        t["special"] = "forest"
+    for t in sawmill_tiles:
+        t["special"] = "sawmill"
+
+    return forest_tiles, sawmill_tiles
+
+
+river_tiles = generate_river()
+generate_lakes(river_tiles)
+forests, sawmills = generate_forest_and_sawmill()
 cities = [tile for tile in board.values() if tile["city"]]
 
+# ---------------------------------------------------------------------------
+# GAME STATE
+# ---------------------------------------------------------------------------
+
 current_token = draw_token()
+storage_token = None
 first_tile_placed = False
 
 score = 0
-trash_penalty = 0
-won = False
+trash_penalty = 0     # -1 per bin use
+river_penalty = 0      # -1 per track placed on a river tile
+undo_penalty = 0       # -2 per undo
+final_bonus = 0        # forest/sawmill bonus minus loose-end penalty, applied once on win
 
-BIN_RECT = pygame.Rect(760, 320, 180, 70)
+forest_powered_count = 0
+sawmill_powered_count = 0
+
+won = False
+won_bonus_applied = False
+
+history = []           # stack of placement actions, for UNDO
+
+# ---------------------------------------------------------------------------
+# UI LAYOUT
+# ---------------------------------------------------------------------------
+
+TOKEN_PREVIEW_CENTER = (850, 150)
+TOKEN_PREVIEW_RECT = pygame.Rect(760, 80, 180, 140)
+
+STORAGE_RECT = pygame.Rect(760, 235, 180, 90)
+STORAGE_CENTER = (850, 280)
+CLEAR_STORAGE_RECT = pygame.Rect(760, 330, 180, 26)
+
+BIN_RECT = pygame.Rect(760, 366, 180, 46)
+UNDO_RECT = pygame.Rect(760, 422, 180, 46)
 
 
 def find_tile(mouse_pos):
@@ -171,14 +302,39 @@ def update_power_network():
 
 
 def recompute_score():
-    global score
+    global score, forest_powered_count, sawmill_powered_count
     powered_score = 0
+    forest_powered_count = 0
+    sawmill_powered_count = 0
+
     for tile in board.values():
         if tile["powered"]:
             powered_score += 1
             if tile["city"]:
                 powered_score += 4
-    score = powered_score + trash_penalty
+            if tile["special"] == "forest":
+                forest_powered_count += 1
+            elif tile["special"] == "sawmill":
+                sawmill_powered_count += 1
+
+    score = powered_score + trash_penalty + river_penalty + undo_penalty + final_bonus
+
+
+def count_loose_ends():
+    """Every road arm that points at an in-bounds tile which does NOT
+    connect back is a loose end (-1 each). Arms pointing off the edge
+    of the map are fine."""
+    loose = 0
+    for tile in board.values():
+        for edge in tile["roads"]:
+            nc, nr = neighbor_coords(tile["col"], tile["row"], edge)
+            nbr = board.get((nc, nr))
+            if nbr is None:
+                continue
+            opposite_edge = (edge + 3) % 6
+            if opposite_edge not in nbr["roads"]:
+                loose += 1
+    return loose
 
 
 def check_win():
@@ -187,22 +343,150 @@ def check_win():
     return all(city["powered"] for city in cities)
 
 
+def refresh_win_state():
+    """Call after any board-changing action. Applies the one-time
+    final bonus/penalty tally the moment all cities become powered,
+    and reverses it if that ever stops being true (e.g. after undo)."""
+    global won, won_bonus_applied, final_bonus
+    won = check_win()
+
+    if won and not won_bonus_applied:
+        loose = count_loose_ends()
+        bonus = min(forest_powered_count, sawmill_powered_count) * 10
+        final_bonus = bonus - loose
+        won_bonus_applied = True
+        recompute_score()
+    elif not won and won_bonus_applied:
+        won_bonus_applied = False
+        final_bonus = 0
+        recompute_score()
+
+
+# ---------------------------------------------------------------------------
+# ACTIONS
+# ---------------------------------------------------------------------------
+
+def place_current_token(tile):
+    global current_token, first_tile_placed, river_penalty
+
+    entry = {"tile": tile, "was_source": False, "river_charged": False}
+
+    if not first_tile_placed:
+        # First placement ever: Y-shaped, unlimited power source.
+        tile["roads"] = random.choice([[0, 2, 4], [1, 3, 5]])
+        tile["is_source"] = True
+        first_tile_placed = True
+        entry["was_source"] = True
+    else:
+        tile["roads"] = current_token.copy()
+
+    if tile["river"]:
+        river_penalty -= 1
+        tile["river_charged"] = True
+        entry["river_charged"] = True
+
+    history.append(entry)
+
+    current_token = draw_token()
+    update_power_network()
+    recompute_score()
+    refresh_win_state()
+
+
+def trash_current_token():
+    global current_token, trash_penalty
+    trash_penalty -= 1
+    current_token = draw_token()
+    recompute_score()
+
+
+def use_storage():
+    global current_token, storage_token
+    if storage_token is None:
+        storage_token = current_token
+        current_token = draw_token()
+    else:
+        current_token, storage_token = storage_token, current_token
+
+
+def clear_storage():
+    global storage_token
+    storage_token = None
+
+
+def undo_last_placement():
+    global first_tile_placed, river_penalty, undo_penalty
+
+    if not history:
+        return
+
+    entry = history.pop()
+    tile = entry["tile"]
+    tile["roads"] = []
+
+    if entry["was_source"]:
+        tile["is_source"] = False
+        first_tile_placed = False
+
+    if entry["river_charged"]:
+        river_penalty += 1
+        tile["river_charged"] = False
+
+    undo_penalty -= 2
+
+    update_power_network()
+    recompute_score()
+    refresh_win_state()
+
+
 # ---------------------------------------------------------------------------
 # DRAWING
 # ---------------------------------------------------------------------------
 
+def draw_forest_icon(cx, cy):
+    top = cy - 24
+    for i, scale in enumerate((1.0, 0.78, 0.56)):
+        w, h = 10 * scale, 8 * scale
+        ty = top + i * 6
+        pygame.draw.polygon(
+            screen, FOREST_GREEN,
+            [(cx - w, ty + h), (cx + w, ty + h), (cx, ty - h)]
+        )
+
+
+def draw_sawmill_icon(cx, cy):
+    center = (cx, cy - 20)
+    pygame.draw.circle(screen, SAWMILL_BROWN, center, 9, 2)
+    r = 7
+    pts = []
+    for i in range(3):
+        ang = math.radians(-90 + 120 * i)
+        pts.append((center[0] + r * math.cos(ang), center[1] + r * math.sin(ang)))
+    pygame.draw.polygon(screen, SAWMILL_BROWN, pts, 2)
+
+
 def draw_tile(tile):
     cx, cy = hex_center(tile["col"], tile["row"])
+    corners = hex_points(cx, cy)
 
-    if tile["city"]:
-        fill = GREEN
+    if tile["lake"]:
+        fill = LAKE_BLUE
+    elif tile["city"]:
+        fill = YELLOW if tile["roads"] else GREEN
     elif tile["powered"]:
         fill = YELLOW
+    elif tile["roads"]:
+        fill = LIGHT_GRAY
     else:
         fill = GRAY
 
-    pygame.draw.polygon(screen, fill, hex_points(cx, cy))
-    pygame.draw.polygon(screen, BLACK, hex_points(cx, cy), 2)
+    pygame.draw.polygon(screen, fill, corners)
+    pygame.draw.polygon(screen, BLACK, corners, 2)
+
+    if tile["river"] and not tile["lake"]:
+        p1 = edge_point(cx, cy, tile["river_edges"][0])
+        p2 = edge_point(cx, cy, tile["river_edges"][1])
+        pygame.draw.line(screen, RIVER_BLUE, p1, p2, 6)
 
     for edge in tile["roads"]:
         p = edge_point(cx, cy, edge)
@@ -215,15 +499,44 @@ def draw_tile(tile):
     elif tile["roads"]:
         pygame.draw.circle(screen, BLUE, (int(cx), int(cy)), 6)
 
+    if tile["special"] == "forest":
+        draw_forest_icon(cx, cy)
+    elif tile["special"] == "sawmill":
+        draw_sawmill_icon(cx, cy)
+
+
+def draw_mini_hex(center, roads, ring_color=GRAY):
+    pygame.draw.circle(screen, ring_color, center, HEX_SIZE - 4)
+    for e in roads:
+        p = edge_point(center[0], center[1], e)
+        pygame.draw.line(screen, BLUE, center, p, 7)
+
 
 def draw_token_preview():
-    pygame.draw.rect(screen, WHITE, (760, 80, 180, 180))
-    pygame.draw.circle(screen, GRAY, (850, 170), HEX_SIZE)
-    for e in current_token:
-        p = edge_point(850, 170, e)
-        pygame.draw.line(screen, BLUE, (850, 170), p, 8)
+    pygame.draw.rect(screen, WHITE, TOKEN_PREVIEW_RECT)
+    pygame.draw.rect(screen, BLACK, TOKEN_PREVIEW_RECT, 2)
     label = FONT.render("Next tile", True, BLACK)
-    screen.blit(label, (790, 40))
+    screen.blit(label, (TOKEN_PREVIEW_RECT.x + 20, TOKEN_PREVIEW_RECT.y + 6))
+    draw_mini_hex(TOKEN_PREVIEW_CENTER, current_token)
+
+
+def draw_storage():
+    pygame.draw.rect(screen, WHITE, STORAGE_RECT)
+    pygame.draw.rect(screen, STORAGE_PURPLE, STORAGE_RECT, 3)
+    label = FONT.render("Storage (click to swap)", True, BLACK)
+    screen.blit(label, (STORAGE_RECT.x + 6, STORAGE_RECT.y + 4))
+
+    if storage_token is None:
+        empty = SMALL_FONT.render("empty", True, GRAY)
+        rect = empty.get_rect(center=(STORAGE_CENTER[0], STORAGE_CENTER[1] + 10))
+        screen.blit(empty, rect)
+    else:
+        draw_mini_hex(STORAGE_CENTER, storage_token, ring_color=LIGHT_GRAY)
+
+    pygame.draw.rect(screen, DARK_RED, CLEAR_STORAGE_RECT, border_radius=6)
+    clear_label = SMALL_FONT.render("Clear storage (free)", True, WHITE)
+    rect = clear_label.get_rect(center=CLEAR_STORAGE_RECT.center)
+    screen.blit(clear_label, rect)
 
 
 def draw_bin():
@@ -234,23 +547,36 @@ def draw_bin():
     screen.blit(label, rect)
 
 
+def draw_undo_button():
+    active = len(history) > 0
+    color = DARK_RED if active else GRAY
+    pygame.draw.rect(screen, color, UNDO_RECT, border_radius=8)
+    pygame.draw.rect(screen, BLACK, UNDO_RECT, 2, border_radius=8)
+    label = FONT.render("Undo last (-2)", True, WHITE)
+    rect = label.get_rect(center=UNDO_RECT.center)
+    screen.blit(label, rect)
+
+
 def draw_hud():
-    score_label = FONT.render(f"Score: {score}", True, BLACK)
-    screen.blit(score_label, (760, 420))
+    y = UNDO_RECT.bottom + 14
+    lines = [
+        f"Score: {score}",
+        f"Cities powered: {sum(1 for c in cities if c['powered'])}/{len(cities)}",
+        f"Forest/Sawmill: {forest_powered_count}/{sawmill_powered_count}",
+    ]
+    for line in lines:
+        screen.blit(FONT.render(line, True, BLACK), (760, y))
+        y += 28
 
-    powered = sum(1 for t in board.values() if t["powered"])
-    cities_powered = sum(1 for c in cities if c["powered"])
-    info_label = FONT.render(
-        f"Cities powered: {cities_powered}/{len(cities)}", True, BLACK
-    )
-    screen.blit(info_label, (760, 455))
-
-    help_label = FONT.render("R: rotate | Click: place | Bin: trash", True, BLACK)
-    screen.blit(help_label, (700, 500))
+    y += 6
+    for line in ("R: rotate", "Click tile: place", "Click bin: trash",
+                 "Click storage: swap/save"):
+        screen.blit(SMALL_FONT.render(line, True, BLACK), (760, y))
+        y += 22
 
     if not first_tile_placed:
-        hint = FONT.render("First placement = power source!", True, DARK_RED)
-        screen.blit(hint, (700, 530))
+        hint = SMALL_FONT.render("First placement = power source!", True, DARK_RED)
+        screen.blit(hint, (760, y + 4))
 
 
 def draw():
@@ -260,12 +586,19 @@ def draw():
         draw_tile(tile)
 
     draw_token_preview()
+    draw_storage()
     draw_bin()
+    draw_undo_button()
     draw_hud()
 
     if won:
         text = BIG_FONT.render("ALL CITIES CONNECTED & POWERED!", True, (20, 120, 20))
-        screen.blit(text, (60, 40))
+        screen.blit(text, (40, 20))
+        breakdown = FONT.render(
+            f"Final score: {score}  (forest/sawmill bonus + loose-end penalty applied)",
+            True, (20, 120, 20)
+        )
+        screen.blit(breakdown, (40, 70))
 
     pygame.display.flip()
 
@@ -273,30 +606,6 @@ def draw():
 # ---------------------------------------------------------------------------
 # GAME LOOP
 # ---------------------------------------------------------------------------
-
-def place_current_token(tile):
-    global current_token, first_tile_placed, won
-
-    if not first_tile_placed:
-        # First placement ever: single-arm, unlimited power source.
-        tile["roads"] = [random.randrange(6)]
-        tile["is_source"] = True
-        first_tile_placed = True
-    else:
-        tile["roads"] = current_token.copy()
-
-    current_token = draw_token()
-    update_power_network()
-    recompute_score()
-    won = check_win()
-
-
-def trash_current_token():
-    global current_token, trash_penalty
-    trash_penalty -= 1
-    current_token = draw_token()
-    recompute_score()
-
 
 running = True
 while running:
@@ -309,11 +618,19 @@ while running:
                 current_token = rotate(current_token)
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if BIN_RECT.collidepoint(event.pos):
+            pos = event.pos
+
+            if UNDO_RECT.collidepoint(pos):
+                undo_last_placement()
+            elif BIN_RECT.collidepoint(pos):
                 trash_current_token()
+            elif CLEAR_STORAGE_RECT.collidepoint(pos):
+                clear_storage()
+            elif STORAGE_RECT.collidepoint(pos):
+                use_storage()
             else:
-                tile = find_tile(event.pos)
-                if tile and not tile["roads"]:
+                tile = find_tile(pos)
+                if tile and not tile["roads"] and not tile["lake"]:
                     place_current_token(tile)
 
     draw()

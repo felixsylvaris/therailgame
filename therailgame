@@ -24,6 +24,11 @@ FOREST_GREEN = (25, 110, 45)
 SAWMILL_BROWN = (120, 70, 20)
 SHOP_PURPLE = (110, 80, 170)
 OK_GREEN = (60, 140, 60)
+HILL_BROWN = (110, 95, 75)
+MINE_COLOR = (90, 75, 60)
+TUNNEL_DARK = (25, 22, 18)
+FORGE_COLOR = (165, 60, 30)
+VINEYARD_PURPLE = (120, 60, 140)
 
 clock = pygame.time.Clock()
 FONT = pygame.font.SysFont(None, 26)
@@ -33,7 +38,7 @@ BIG_FONT = pygame.font.SysFont(None, 50)
 HEX_SIZE = 40
 COLS = 10
 ROWS = 8
-NUM_CITIES = 7
+NUM_CITIES = 5
 
 # ---------------------------------------------------------------------------
 # HEX GEOMETRY
@@ -108,22 +113,6 @@ def rotate(token):
 # BOARD / TERRAIN GENERATION
 # ---------------------------------------------------------------------------
 
-board = {}
-for c in range(COLS):
-    for r in range(ROWS):
-        board[(c, r)] = {
-            "col": c, "row": r,
-            "roads": [],
-            "city": False,
-            "is_source": False,
-            "powered": False,
-            "river": False,
-            "river_edges": None,
-            "lake": False,
-            "special": None,
-        }
-
-
 def generate_river():
     start_col = random.randrange(COLS)
     tile = board[(start_col, 0)]
@@ -188,35 +177,160 @@ def generate_cities(n=NUM_CITIES):
     return chosen
 
 
-river_tiles = generate_river()
-generate_lakes()
-forests, sawmills = generate_forest_and_sawmill()
-cities = generate_cities()
+def is_empty_terrain(t):
+    """No city, river, lake, hill, or special feature - a genuinely plain tile."""
+    return (not t["city"] and not t["river"] and not t["lake"]
+            and not t["hill"] and t["special"] is None)
+
+
+def generate_hills(n=4):
+    """4 hills on the top half of the map, never on the very first row,
+    first column, or last column - and never on another feature."""
+    candidates = [
+        t for t in board.values()
+        if 1 <= t["row"] < ROWS // 2 and 1 <= t["col"] < COLS - 1
+        and not t["city"] and not t["river"] and not t["lake"] and t["special"] is None
+    ]
+    chosen = random.sample(candidates, min(n, len(candidates)))
+    for t in chosen:
+        t["hill"] = True
+    return chosen
+
+
+def generate_mines(hill_tiles, n=2):
+    """Walk the hills in order; drop a mine on the first empty neighbor
+    of each. Skip a hill with no empty neighbor. Run out of hills before
+    reaching n and you simply end up with fewer mines."""
+    mines = []
+    for hill in hill_tiles:
+        if len(mines) >= n:
+            break
+        for e in range(6):
+            nc, nr = neighbor_coords(hill["col"], hill["row"], e)
+            nbr = board.get((nc, nr))
+            if nbr is not None and is_empty_terrain(nbr):
+                nbr["special"] = "mine"
+                mines.append(nbr)
+                break
+    return mines
+
+
+def generate_forges(city_tiles, n=2):
+    """Scan cities from the bottom of the map upward. Drop a forge on the
+    first empty neighbor found. After a successful placement, skip the
+    very next city and try the one after that; after a failed attempt,
+    just move to the next city."""
+    forges = []
+    sorted_cities = sorted(city_tiles, key=lambda t: -t["row"])
+    idx = 0
+    while len(forges) < n and idx < len(sorted_cities):
+        city = sorted_cities[idx]
+        placed = False
+        for e in range(6):
+            nc, nr = neighbor_coords(city["col"], city["row"], e)
+            nbr = board.get((nc, nr))
+            if nbr is not None and is_empty_terrain(nbr):
+                nbr["special"] = "forge"
+                forges.append(nbr)
+                placed = True
+                break
+        idx += 2 if placed else 1
+    return forges
+
+
+def has_river_neighbor(t):
+    for e in range(6):
+        nc, nr = neighbor_coords(t["col"], t["row"], e)
+        nbr = board.get((nc, nr))
+        if nbr is not None and nbr["river"]:
+            return True
+    return False
+
+
+def generate_vineyards(n=2):
+    """Scan rows from the bottom of the map upward, looking for a plain
+    tile that sits next to a river. Place one, then jump 2 rows up and
+    scan again for the next."""
+    vineyards = []
+    row = ROWS - 1
+    while len(vineyards) < n and row >= 0:
+        candidates = [t for t in board.values()
+                      if t["row"] == row and is_empty_terrain(t) and has_river_neighbor(t)]
+        if candidates:
+            chosen = random.choice(candidates)
+            chosen["special"] = "vineyard"
+            vineyards.append(chosen)
+            row -= 2
+        else:
+            row -= 1
+    return vineyards
+
+
+def new_game():
+    """(Re)generate the board, terrain, hand, and all score counters from
+    scratch - used both at startup and by the Reroll map button."""
+    global board, river_tiles, forests, sawmills, cities, hills, mines, forges, vineyards
+    global hand, hand_is_source, selected_slot, first_tile_placed
+    global score, placement_cost_total, overdraw_cost_total, trash_cost_total
+    global shop_cost_total, undo_cost_total, final_bonus
+    global forest_powered_count, sawmill_powered_count, mine_powered_count, forge_powered_count
+    global won, won_bonus_applied, history
+
+    board = {}
+    for c in range(COLS):
+        for r in range(ROWS):
+            board[(c, r)] = {
+                "col": c, "row": r,
+                "roads": [],
+                "city": False,
+                "is_source": False,
+                "powered": False,
+                "river": False,
+                "river_edges": None,
+                "lake": False,
+                "special": None,
+                "hill": False,
+            }
+
+    river_tiles = generate_river()
+    generate_lakes()
+    forests, sawmills = generate_forest_and_sawmill()
+    cities = generate_cities()
+    hills = generate_hills()
+    mines = generate_mines(hills)
+    forges = generate_forges(cities)
+    vineyards = generate_vineyards()
+
+    hand = [draw_token(), draw_token(), draw_token(),
+            random.choice([[0, 2, 4], [1, 3, 5]]), None]
+    hand_is_source = [False, False, False, True, False]  # slot 3 is the power source
+    selected_slot = None
+    first_tile_placed = False
+
+    score = 0
+    placement_cost_total = 0
+    overdraw_cost_total = 0
+    trash_cost_total = 0
+    shop_cost_total = 0
+    undo_cost_total = 0
+    final_bonus = 0
+
+    forest_powered_count = 0
+    sawmill_powered_count = 0
+    mine_powered_count = 0
+    forge_powered_count = 0
+
+    won = False
+    won_bonus_applied = False
+    history = []
+
+
+new_game()
 
 # ---------------------------------------------------------------------------
 # GAME STATE
 # ---------------------------------------------------------------------------
 
-hand = [draw_token(), draw_token(), draw_token(),
-        random.choice([[0, 2, 4], [1, 3, 5]]), None]
-hand_is_source = [False, False, False, True, False]  # slot 3 is the power source
-selected_slot = None
-first_tile_placed = False
-
-score = 0
-placement_cost_total = 0
-overdraw_cost_total = 0
-trash_cost_total = 0
-shop_cost_total = 0
-undo_cost_total = 0
-final_bonus = 0
-
-forest_powered_count = 0
-sawmill_powered_count = 0
-
-won = False
-won_bonus_applied = False
-history = []
 
 # ---------------------------------------------------------------------------
 # UI LAYOUT
@@ -270,9 +384,12 @@ def update_power_network():
 
 def recompute_score():
     global score, forest_powered_count, sawmill_powered_count
+    global mine_powered_count, forge_powered_count
     powered_score = 0
     forest_powered_count = 0
     sawmill_powered_count = 0
+    mine_powered_count = 0
+    forge_powered_count = 0
 
     for tile in board.values():
         if tile["powered"]:
@@ -282,6 +399,12 @@ def recompute_score():
                 forest_powered_count += 1
             elif tile["special"] == "sawmill":
                 sawmill_powered_count += 1
+            elif tile["special"] == "mine":
+                mine_powered_count += 1
+            elif tile["special"] == "forge":
+                forge_powered_count += 1
+            elif tile["special"] == "vineyard":
+                powered_score += 5  # optional bonus, doesn't gate the win
 
     score = (powered_score + placement_cost_total + overdraw_cost_total
              + trash_cost_total + shop_cost_total + undo_cost_total + final_bonus)
@@ -311,7 +434,8 @@ def refresh_win_state():
     won = check_win()
     if won and not won_bonus_applied:
         loose = count_loose_ends()
-        bonus = min(forest_powered_count, sawmill_powered_count) * 10
+        bonus = (min(forest_powered_count, sawmill_powered_count) * 10
+                 + min(mine_powered_count, forge_powered_count) * 10)
         final_bonus = bonus - loose
         won_bonus_applied = True
         recompute_score()
@@ -356,7 +480,7 @@ def place_selected_tile(tile):
         tile["is_source"] = True
         first_tile_placed = True
 
-    cost = -2 if tile["river"] else -1
+    cost = -3 if tile["hill"] else (-2 if tile["river"] else -1)
     placement_cost_total += cost
 
     hand[selected_slot] = None
@@ -467,6 +591,40 @@ def draw_sawmill_icon(cx, cy):
     pygame.draw.polygon(screen, SAWMILL_BROWN, pts, 2)
 
 
+def draw_hill_icon(cx, cy):
+    top = cy - 22
+    pts = [(cx - 14, top + 16), (cx + 14, top + 16), (cx, top - 10)]
+    pygame.draw.polygon(screen, HILL_BROWN, pts)
+    cap = [(cx - 5, top - 1), (cx + 5, top - 1), (cx, top - 10)]
+    pygame.draw.polygon(screen, WHITE, cap)
+
+
+def draw_mine_icon(cx, cy):
+    r = 11
+    top = cy - 18
+    pts = [(cx - r, top)]
+    for deg in range(180, 361, 20):
+        rad = math.radians(deg)
+        pts.append((cx + r * math.cos(rad), top + r * math.sin(rad)))
+    pygame.draw.polygon(screen, MINE_COLOR, pts)
+    pygame.draw.circle(screen, TUNNEL_DARK, (int(cx), int(top + 2)), 5)
+
+
+def draw_forge_icon(cx, cy):
+    top_w, bot_w, h = 15, 7, 12
+    top_y = cy - 26
+    bot_y = top_y + h
+    pts = [(cx - top_w, top_y), (cx + top_w, top_y),
+           (cx + bot_w, bot_y), (cx - bot_w, bot_y)]
+    pygame.draw.polygon(screen, FORGE_COLOR, pts)
+
+
+def draw_vineyard_icon(cx, cy):
+    top = cy - 24
+    for dx, dy in ((-6, 0), (6, 0), (0, 8)):
+        pygame.draw.circle(screen, VINEYARD_PURPLE, (int(cx + dx), int(top + dy)), 4)
+
+
 def draw_tile(tile):
     cx, cy = hex_center(tile["col"], tile["row"])
     corners = hex_points(cx, cy)
@@ -505,6 +663,15 @@ def draw_tile(tile):
         draw_forest_icon(cx, cy)
     elif tile["special"] == "sawmill":
         draw_sawmill_icon(cx, cy)
+    elif tile["special"] == "mine":
+        draw_mine_icon(cx, cy)
+    elif tile["special"] == "forge":
+        draw_forge_icon(cx, cy)
+    elif tile["special"] == "vineyard":
+        draw_vineyard_icon(cx, cy)
+
+    if tile["hill"]:
+        draw_hill_icon(cx, cy)
 
 
 def draw_mini_hex(center, roads, ring_color=GRAY, radius=30, center_dot_color=None):
@@ -602,6 +769,7 @@ def draw_hud():
         f"Score: {score}",
         f"Cities powered: {sum(1 for c in cities if c['powered'])}/{len(cities)}",
         f"Forest/Sawmill: {forest_powered_count}/{sawmill_powered_count}",
+        f"Mine/Forge: {mine_powered_count}/{forge_powered_count}",
         f"Hand: {sum(1 for t in hand if t is not None)}/5",
     ]
     for line in lines:
